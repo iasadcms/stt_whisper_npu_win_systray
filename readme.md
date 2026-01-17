@@ -66,8 +66,15 @@ API server started on http://127.0.0.1:52625
 
 ## Compiling to Executable
 
+Install pyinstaller if not done so already:
 
+```cmd
+pip install pyinstaller
+```
+
+Run the following command to convert the python script into an exe.
 
 ```cmd
 pyinstaller --onefile --windowed stt_whisper_npu_win_systray.py
+
 ```
