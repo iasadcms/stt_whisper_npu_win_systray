@@ -1,24 +1,47 @@
-# Speech-To-Text Whisper NPU Windows System Tray
+# Speech-to_text using Whistper and AMD NPU.
 
-This project is a Windows system tray application that transcribes microphone input and inserts the resulting text into the currently active window at the cursor position.
+A lightweight Windows System Tray utility that provides real-time speech-to-text transcription directly into your active window.
+Originally developed as a personal productivity tool to explore the capabilities of Whisper running on an NPU, it will also work with other Whisper servers.
 
-It leverages FlowLightLM (https://fastflowlm.com/) to expose the Whisper model running on the NPU.
+## Prerequisites - Whisper endpoint using FastFlowLM
 
+Skip this step if you're using a different Whisper endpoint.
 
-## Installation Guide
+To utilize the AMD NPU, you must first set up FastFlowLM as your local Whisper server.
 
-- Install Python 3.13+
+1. Download & Install: Get the latest version from https://fastflowlm.com/.
 
-- Download and install fastflowlm. Ensure it's available at the command line by typing `flm --version`
+2. Verify Installation: Open your terminal and run:
 
-```cmd
-C:\Users\username>flm --version
-FLM v0.9.24
+```DOS
+flm --version
 ```
 
-- Clone the repository.
+3. Start the Server: Launch the API server (Port 52625) by running:
 
-- Create a custom python environment and install requirements:
+```DOS
+flm serve -a 1
+```
+
+*Note: On the first run, it will automatically download the necessary Whisper models.*
+```
+Downloading model...
+Loading model into memory...
+API server started on http://127.0.0.1:52625
+```
+
+## Run from Source
+
+Ensure you have Python 3.13+ installed, then:
+
+1. Clone the repository:
+
+```cmd
+git clone https://github.com/iasadcms/stt_whisper_npu_win_systray.git
+cd stt_whisper_npu_win_systray
+```
+
+2. Set up a virtual environment:
 
 ```cmd
 python -m venv .venv
@@ -26,55 +49,73 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-
-
-## Running
-
-Start the python script. Use --help for options.
+3. Launch the script
 
 ```
-Usage:
-    python script.py                               # Run with default config
-    python script.py --config my_config.json       # Use custom config
-    python script.py --list-devices                # List audio devices
+python main.py
 ```
 
-When launched, the application will live in the Windows system tray.
+### Nuilding an Executable
 
-To start and stop transcription, use the following hotkeys:
-- CTRL+SHIFT+F1 - Resume/Pause recording.
-- CTRL+SHIFT+F2 - Stop recordings and clear queued audio.
+If you prefer a standalone .exe:
 
+1. Install PyInstaller: `pip install pyinstaller`
 
-On the first run, the config file `transcription_config.json` will be created with defaults.
+2. Run the build script: `.\make-exe.bat`
 
-
-### Starting the FLM server
-
-```cmd
-flm serve -a 1
-```
-
-You'll see output similar to like:
-
-```
-Downloading model...
-Loading model into memory...
-API server started on http://127.0.0.1:52625
-```
+3. Find the executable in the `\dist` folder, named `stt_whisper_npu_win_systray.exe`.
 
 
-## Compiling to Executable
 
-Install pyinstaller if not done so already:
+## Usage
 
-```cmd
-pip install pyinstaller
-```
+Once launched, the application will live in your Windows system tray. It creates a `transcription_config.json` file on its first run, which you can edit to customise settings.
 
-Run the following command to convert the python script into an exe.
+**Default Hotkeys**
+|Hotkey|Action|
+|--|--|
+|CTRL+SHIFT+F1|Toggle Recording (Resume / Pause)|
+|CTRL+SHIFT+F2|Stop recording and clear the current audio queue|
+|CTRL+SHIFT+F3|Force analysis of the current buffer (without stopping)|
 
-```cmd
-pyinstaller --onefile --windowed stt_whisper_npu_win_systray.py
+**CLI Options**
 
 ```
+python main.py --config custom.json  # Use a specific config file
+python main.py --list-devices        # List available audio input devices
+```
+
+
+## Customization & Output
+You can configure how your transcriptions are delivered via the config file:
+- Direct Injection: Text is typed directly into your active cursor.
+- Notepad Mode: Text is sent to a specific .txt file.
+- Logging: The app maintains a transcription_log for all conversations (can be disabled).
+
+
+## Alternative Whisper Servers
+While optimized for FastFlowLM, this utility is compatible with any OpenAI-compatible Whisper endpoint, including:
+
+- Faster-Whisper-Server - https://github.com/fedirz/faster-whisper-server
+- LocalAI - https://localai.io/
+- Whisper.cpp HTTP server - https://github.com/ggerganov/whisper.cpp
+
+The default configuration expects the server at `http://127.0.0.1:52625/v1`
+
+
+## License and Credits
+
+Built with:
+AI assistance from "every model under the sun."
+
+**MIT License**
+
+	Copyright 2026 iasadcms
+	
+	Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation |the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+	
+	The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+	
+	THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL |THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER |DEALINGS IN THE SOFTWARE.
+
+.
