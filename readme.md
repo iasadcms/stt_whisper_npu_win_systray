@@ -45,7 +45,7 @@ cd stt_whisper_npu_win_systray
 
 ```cmd
 python -m venv .venv
-.venv/scripts/activate.bat
+.venv\scripts\activate.bat
 pip install -r requirements.txt
 ```
 
@@ -120,3 +120,4 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
 
 
 .
+
