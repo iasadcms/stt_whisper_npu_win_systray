@@ -65,7 +65,7 @@ If you prefer a standalone .exe:
 
 3. Find the executable in the `\dist` folder, named `stt_whisper_npu_win_systray.exe`.
 
-
+ 
 
 ## Usage
 
