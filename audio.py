@@ -5,7 +5,7 @@ Audio Processing Module
 Handles audio streaming, VAD (Voice Activity Detection), and audio processing.
 """
 
-import pyaudio
+import sounddevice as sd
 import wave
 import array
 import threading
@@ -14,17 +14,16 @@ import datetime
 import os
 import io
 import time
+import numpy as np
 
 
 def list_audio_devices():
     """List all available audio input devices."""
-    p = pyaudio.PyAudio()
+    devices = sd.query_devices()
     print("\nAvailable audio input devices:")
-    for i in range(p.get_device_count()):
-        dev = p.get_device_info_by_index(i)
-        if dev['maxInputChannels'] > 0:
+    for i, dev in enumerate(devices):
+        if dev['max_input_channels'] > 0:
             print(f"  Device {i}: {dev['name']}")
-    p.terminate()
 
 
 class AudioProcessor:
@@ -37,37 +36,55 @@ class AudioProcessor:
         self.audio_queue = audio_queue
         self.recording_enabled = recording_enabled
         self.logger = logger
-        
-        # PyAudio setup
-        self.p = pyaudio.PyAudio()
+
+        # SoundDevice setup
         self.stream = None
         self.current_device = config["audio"]["device_index"]
-        
+
         # Counter for audio chunk numbering
         self.audio_chunk_counter = 0
         self.audio_chunk_lock = threading.Lock()
-        
+
         # Create temp audio directory
         self.temp_audio_dir = "temp_audio"
         os.makedirs(self.temp_audio_dir, exist_ok=True)
-        
+
         # Force flush flag
         self.force_flush_flag = False
+        
+        # Hard stop flag
+        self.hard_stop_flag = False
+
+        # Audio buffer for SoundDevice callback
+        self.audio_buffer = queue.Queue()
+        
+        # Lock for thread-safe frame operations
+        self.frames_lock = threading.Lock()
     
     def restart_stream(self):
         """Restart the audio stream with new device."""
         if self.stream:
-            self.stream.stop_stream()
+            self.stream.stop()
             self.stream.close()
-        
-        self.stream = self.p.open(
-            format=pyaudio.paInt16,
+
+        def audio_callback(indata, frames, time, status):
+            """Callback function for SoundDevice stream."""
+            if status:
+                self.logger.warning(f"Audio stream status: {status}")
+            if self.recording_enabled.is_set() and not self.hard_stop_flag:
+                # Convert numpy array to bytes (16-bit PCM)
+                audio_bytes = indata.tobytes()
+                self.audio_buffer.put(audio_bytes)
+
+        self.stream = sd.InputStream(
+            device=self.current_device,
             channels=1,
-            rate=self.config["audio"]["rate"],
-            input=True,
-            input_device_index=self.current_device,
-            frames_per_buffer=self.config["audio"]["chunk_size"]
+            samplerate=self.config["audio"]["rate"],
+            dtype='int16',
+            blocksize=self.config["audio"]["chunk_size"],
+            callback=audio_callback
         )
+        self.stream.start()
     
     def select_device(self, device_index):
         """Select a new microphone device."""
@@ -157,24 +174,31 @@ class AudioProcessor:
         try:
             while running.is_set():
                 try:
-                    # Always read audio to prevent gaps
-                    if self.stream and self.stream.is_active():
-                        data = self.stream.read(
-                            self.config["audio"]["chunk_size"],
-                            exception_on_overflow=False
-                        )
-                    else:
-                        # Stream is not active, wait a bit and continue
-                        time.sleep(0.01)
+                    # Check for hard stop
+                    if self.hard_stop_flag:
+                        self.logger.info("Hard stop detected - clearing current buffer")
+                        with self.frames_lock:
+                            frames = []
+                            is_speaking = False
+                            silent_chunks = 0
+                        self.hard_stop_flag = False
+                        continue
+                    
+                    # Get audio data from the callback buffer
+                    try:
+                        data = self.audio_buffer.get(timeout=0.1)
+                    except queue.Empty:
+                        # No audio data available, continue loop
                         continue
 
                     # Only process if recording is enabled
                     if self.recording_enabled.is_set():
-                        frames.append(data)
+                        with self.frames_lock:
+                            frames.append(data)
 
-                        # Check volume level
-                        as_ints = array.array('h', data)
-                        max_val = max(abs(i) for i in as_ints) if as_ints else 0
+                        # Check volume level - convert bytes back to numpy array for analysis
+                        audio_array = np.frombuffer(data, dtype='int16')
+                        max_val = np.max(np.abs(audio_array)) if len(audio_array) > 0 else 0
 
                         # Compare max volume against threshold
                         if max_val > self.config["audio"]["silence_threshold"]:
@@ -187,7 +211,6 @@ class AudioProcessor:
                             if is_speaking and silent_chunks == 1:
                                 self.logger.debug(f"Silence started (volume: {max_val})")
 
-                        # Check if we should send the accumulated audio
                         # Check if we should send the accumulated audio
                         should_send = False
                         send_reason = ""
@@ -207,7 +230,10 @@ class AudioProcessor:
 
                         if should_send and frames:
                             # Send audio to queue for processing
-                            audio_data = b''.join(frames)
+                            with self.frames_lock:
+                                audio_data = b''.join(frames)
+                                frames_count = len(frames)
+                            
                             self.audio_queue.put(audio_data)
 
                             # Log queue status periodically
@@ -220,10 +246,11 @@ class AudioProcessor:
                                     self.logger.info(f"Queue status: {queue_size} items waiting")
                                 last_queue_log_time = current_time
 
-                            self.logger.info(f"Sending audio: {send_reason}, {len(frames)} chunks total")
+                            self.logger.info(f"Sending audio: {send_reason}, {frames_count} chunks total")
 
                             # Reset for next segment
-                            frames = []
+                            with self.frames_lock:
+                                frames = []
                             is_speaking = False
                             silent_chunks = 0
                             # Reset force flush flag after handling
@@ -232,12 +259,13 @@ class AudioProcessor:
                     else:
                         # If recording is disabled, clear any accumulated frames
                         if frames:
-                            frames = []
+                            with self.frames_lock:
+                                frames = []
                             is_speaking = False
                             silent_chunks = 0
                         time.sleep(0.01)
 
-                except IOError as e:
+                except Exception as e:
                     # Handle stream read errors gracefully
                     self.logger.warning(f"Stream read error: {e}")
                     time.sleep(0.1)
@@ -246,24 +274,33 @@ class AudioProcessor:
         except Exception as e:
             self.logger.error(f"Recording error: {e}")
         finally:
-            # Send any remaining audio
-            if frames:
-                self.audio_queue.put(b''.join(frames))
+            # Send any remaining audio (but not if hard stop was triggered)
+            if frames and not self.hard_stop_flag:
+                with self.frames_lock:
+                    self.audio_queue.put(b''.join(frames))
             self.logger.info("Audio recording thread stopped")
     
     def force_flush_audio(self):
         """Force flush any accumulated audio frames to the queue."""
-        # This method will be implemented in the record_vad method
-        # by setting a flag that triggers immediate flush
         self.force_flush_flag = True
         self.logger.info("Force flush audio flag set")
+    
+    def hard_stop(self):
+        """Hard stop - immediately discard current buffer and clear audio queue."""
+        self.hard_stop_flag = True
+        
+        # Clear the audio buffer from the callback
+        while not self.audio_buffer.empty():
+            try:
+                self.audio_buffer.get_nowait()
+            except queue.Empty:
+                break
+        
+        self.logger.info("Hard stop executed - current buffer discarded")
 
     def cleanup(self):
         """Clean up audio resources."""
         # Stop stream
         if self.stream:
-            self.stream.stop_stream()
+            self.stream.stop()
             self.stream.close()
-        
-        if self.p:
-            self.p.terminate()

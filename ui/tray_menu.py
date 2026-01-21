@@ -18,14 +18,12 @@ class TrayMenu:
     
     def get_audio_devices(self):
         """Get list of available audio input devices."""
-        import pyaudio
+        import sounddevice as sd
         devices = []
-        p = pyaudio.PyAudio()
-        for i in range(p.get_device_count()):
-            dev = p.get_device_info_by_index(i)
-            if dev['maxInputChannels'] > 0:
+        all_devices = sd.query_devices()
+        for i, dev in enumerate(all_devices):
+            if dev['max_input_channels'] > 0:
                 devices.append((i, dev['name']))
-        p.terminate()
         return devices
     
     def create_device_menu(self):

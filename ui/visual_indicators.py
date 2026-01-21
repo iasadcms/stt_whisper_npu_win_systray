@@ -89,7 +89,7 @@ class VisualIndicators:
             alpha = self.config["visual"]["overlay_alpha"]
             animation_duration = self.config["visual"]["animation_speed"]
 
-            frames = int(animation_duration * 60)
+            frames = int(animation_duration * 30)
             clock = pygame.time.Clock()
 
             for frame in range(frames):
@@ -118,7 +118,7 @@ class VisualIndicators:
                 window.fill((0, 0, 0))
                 window.blit(surface, (0, 0))
                 pygame.display.flip()
-                clock.tick(60)
+                clock.tick(20)
 
         except Exception as e:
             print(f"Error in start animation: {e}")
@@ -180,9 +180,9 @@ class VisualIndicators:
             alpha = self.config["visual"]["overlay_alpha"]
             animation_duration = self.config["visual"]["animation_speed"]
             
-            frames = int(animation_duration * 60)
+            frames = int(animation_duration * 30)
             clock = pygame.time.Clock()
-            
+
             for frame in range(frames):
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
@@ -190,14 +190,14 @@ class VisualIndicators:
                     # Handle window close events
                     if event.type == pygame.WINDOWCLOSE:
                         break
-                
+
                 progress = frame / frames
                 ease_progress = math.pow(progress, 3)
-                
+
                 surface.fill((0, 0, 0, 0))
                 center = (size // 2, size // 2)
                 max_radius = size // 2 - 2
-                
+
                 for ring in range(3):
                     ring_progress = 1 - ease_progress + (ring * 0.1)
                     if ring_progress > 0 and ring_progress <= 1:
@@ -206,11 +206,11 @@ class VisualIndicators:
                         color_with_alpha = (*color, ring_alpha)
                         if radius > 0:
                             pygame.draw.circle(surface, color_with_alpha, center, radius, 2)
-                
+
                 window.fill((0, 0, 0))
                 window.blit(surface, (0, 0))
                 pygame.display.flip()
-                clock.tick(60)
+                clock.tick(15)
             
         except Exception as e:
             print(f"Error in stop animation: {e}")
@@ -314,13 +314,13 @@ class VisualIndicators:
             
             t = 0
             clock = pygame.time.Clock()
-            
+
             try:
                 import win32gui
                 hwnd = pygame.display.get_wm_info()['window']
             except:
                 hwnd = None
-            
+
             while not self.stop_indicator.is_set():
                 # Handle pygame events
                 for event in pygame.event.get():
@@ -329,33 +329,33 @@ class VisualIndicators:
                     # Handle window close events
                     if event.type == pygame.WINDOWCLOSE:
                         self.stop_indicator.set()
-                
+
                 # Get cursor position and center window on cursor
                 x, y = pyautogui.position()
                 offset = size // 2
-                
+
                 if hwnd:
                     try:
                         win32gui.SetWindowPos(hwnd, -1, x - offset, y - offset, 0, 0, 1)
                     except:
                         pass
-                
+
                 pulse = (math.sin(t) + 1) / 2
                 surface.fill((0, 0, 0, 0))
                 center = (size // 2, size // 2)
                 max_radius = size // 2 - 2
-                
+
                 for ring in range(3):
                     ring_phase = pulse + (ring * 0.33)
                     if ring_phase > 1:
                         ring_phase -= 1
-                    
+
                     radius = int(max_radius * (0.4 + 0.6 * ring_phase))
                     ring_alpha = int(alpha * (1 - ring_phase * 0.7))
                     color_with_alpha = (*base_color, ring_alpha)
-                    
+
                     thickness = max(1, 3 - ring)
-                    
+
                     # Draw different shapes based on mode
                     if shape_type == "square":
                         # Draw square/diamond shape for notebook mode
@@ -365,16 +365,16 @@ class VisualIndicators:
                     else:
                         # Draw circle for normal mode
                         pygame.draw.circle(surface, color_with_alpha, center, radius, thickness)
-                
+
                 window.fill((0, 0, 0))
                 window.blit(surface, (0, 0))
                 pygame.display.flip()
-                
-                t += (2 * math.pi) / (pulse_speed * 60)
+
+                t += (2 * math.pi) / (pulse_speed * 30)
                 if t > 2 * math.pi:
                     t -= 2 * math.pi
-                
-                clock.tick(60)
+
+                clock.tick(30)
             
         except Exception as e:
             print(f"Error in pulse overlay: {e}")
