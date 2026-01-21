@@ -26,4 +26,4 @@ urllib3==2.6.3
 certifi>=2017.4.17
 idna>=2.5,<4
 
->>>>>>> 98297a3bd3809e6ebf8e438b09372ebf8628d624
+>>>>>>> 6a6136d (Update requirements.txt)
