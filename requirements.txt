@@ -1,12 +1,3 @@
-# Core dependencies explicitly imported in the code
-#requests>=2.32.5
-#openai>=2.15.0
-#pystray>=0.19.5
-#pynput>=1.8.1
-#PyAutoGUI>=0.9.54
-#pyaudio>=0.2.14
-#Pillow>=12.1.0
-
 pynput
 pystray
 pyautogui
@@ -16,16 +7,3 @@ openai
 requests
 pygame-ce
 pywin32
-
-# Direct dependencies of the above packages
-#charset-normalizer==3.4.4
-#urllib3==2.6.3
-#certifi>=2017.4.17
-#idna>=2.5,<4
-
-# for pyaudio using python 3.14
-#git clone https://github.com/microsoft/vcpkg
-#.\vcpkg\bootstrap-vcpkg.bat
-#.\vcpkg\vcpkg install portaudio:x64-windows
-#setx VCPKG_PATH D:\path\to\vcpkg
-#pip install pyaudio
