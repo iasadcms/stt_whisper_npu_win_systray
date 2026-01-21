@@ -1,4 +1,4 @@
-# Speech-to_text using Whistper and AMD NPU.
+# Speech-to-text using Whistper (and AMD NPU).
 
 A lightweight Windows System Tray utility that provides real-time speech-to-text transcription directly into your active window.
 Originally developed as a personal productivity tool to explore the capabilities of Whisper running on an NPU, it will also work with other Whisper servers.
@@ -45,7 +45,7 @@ cd stt_whisper_npu_win_systray
 
 ```cmd
 python -m venv .venv
-.venv/scripts/activate.bat
+.venv\scripts\activate.bat
 pip install -r requirements.txt
 ```
 
@@ -120,3 +120,5 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
 
 
 .
+
+
