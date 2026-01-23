@@ -76,7 +76,7 @@ Once launched, the application will live in your Windows system tray. It creates
 |--|--|
 |CTRL+SHIFT+F1|Toggle Recording (Resume / Pause)|
 |CTRL+SHIFT+F2|Stop recording and clear the current audio queue|
-|CTRL+SHIFT+F3|Force analysis of the current buffer (without stopping)|
+|CTRL+SHIFT+`|Force analysis of the current buffer (without stopping)|
 
 **CLI Options**
 

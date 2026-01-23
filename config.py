@@ -7,6 +7,7 @@ Handles loading, saving, and managing application configuration.
 
 import os
 import json
+from path_utils import validate_and_prepare_path, resolve_relative_path
 
 # Default configuration
 DEFAULT_CONFIG = {
@@ -38,7 +39,8 @@ DEFAULT_CONFIG = {
     },
     "hotkeys": {
         "toggle": "ctrl+shift+f1",  # Hotkey to toggle recording on/off
-        "stop": "ctrl+shift+f2"  # Hotkey to stop recording and clear queue
+        "stop": "ctrl+shift+f2",  # Hotkey to stop recording and clear queue
+        "submit": "ctrl+shift+`"
     },
     "filters": {
         # Common Whisper hallucinations to filter out (won't be typed or logged)
@@ -65,9 +67,17 @@ DEFAULT_CONFIG = {
         "overlay_alpha": 200,  # Transparency level 0-255 (255 = opaque, 0 = invisible)
         "animation_enabled": True,  # Enable start/stop animations
         "animation_speed": 0.5,  # Duration of start/stop animations in seconds
-        "notebook_indicator_color": (60, 60, 255),  # RGB color for notebook mode (blue)
+        "notebook_indicator_color": (100, 200, 255),  # RGB color for notebook mode (bright cyan-blue)
         "notebook_indicator_shape": "square",  # Shape for notebook mode indicator
-        "notebook_pulse_pattern": "double"  # Different animation pattern for notebook
+        "notebook_pulse_pattern": "double",  # Different animation pattern for notebook
+        "buffer_draining_color": (255, 255, 0),  # RGB color for buffer draining state (yellow)
+        "endpoint_unavailable_color": (255, 165, 0),  # RGB color for endpoint unavailable state (orange)
+        "idle_icon_color": (0, 255, 0),  # RGB color for idle tray icon (green)
+        "cursor_indicator_type": "speaking",  # "speaking" for radiating sound waves
+        "notebook_indicator_type": "radiating_lines"  # "radiating_lines" for inward lines
+    },
+    "logging": {
+        "debug": False  # Debug logging enabled/disabled
     }
 }
 
@@ -75,16 +85,19 @@ DEFAULT_CONFIG = {
 def load_config(config_path="transcription_config.json"):
     """
     Load configuration from JSON file or create default.
-    
+
     Args:
         config_path: Path to configuration file
-        
+
     Returns:
         Dictionary containing merged configuration
     """
-    if os.path.exists(config_path):
+    # Resolve config path relative to script directory
+    resolved_config_path = resolve_relative_path(config_path)
+
+    if os.path.exists(resolved_config_path):
         try:
-            with open(config_path, 'r') as f:
+            with open(resolved_config_path, 'r') as f:
                 user_config = json.load(f)
             # Merge with defaults (user config overrides defaults)
             config = DEFAULT_CONFIG.copy()
@@ -100,26 +113,48 @@ def load_config(config_path="transcription_config.json"):
     else:
         # Only create default config file if using the default path
         if config_path == "transcription_config.json":
-            with open(config_path, 'w') as f:
+            with open(resolved_config_path, 'w') as f:
                 json.dump(DEFAULT_CONFIG, f, indent=4)
-            print(f"Created default config: {config_path}")
+            print(f"Created default config: {resolved_config_path}")
             return DEFAULT_CONFIG.copy()
         else:
             # If a custom config path is provided and it doesn't exist, fail
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+            raise FileNotFoundError(f"Configuration file not found: {resolved_config_path}")
 
 
-def save_config(config, config_path="transcription_config.json"):
+def save_config(config, config_path="transcription_config.json", logger=None):
     """
     Save current configuration to file.
     
     Args:
         config: Configuration dictionary to save
         config_path: Path to configuration file
+        logger: Optional logger instance for logging messages
     """
+    # Validate path before attempting to write
+    path_valid, validation_message = validate_and_prepare_path(config_path, logger)
+    
+    if not path_valid:
+        error_msg = f"Cannot save configuration: {validation_message}"
+        if logger:
+            logger.error(error_msg)
+        else:
+            print(error_msg)
+        return False
+    
     try:
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
-        print("Configuration saved")
+        success_msg = "Configuration saved successfully"
+        if logger:
+            logger.info(success_msg)
+        else:
+            print(success_msg)
+        return True
     except Exception as e:
-        print(f"Error saving config: {e}")
+        error_msg = f"Error saving config: {e}"
+        if logger:
+            logger.error(error_msg)
+        else:
+            print(error_msg)
+        return False

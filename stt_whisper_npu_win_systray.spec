@@ -129,6 +129,7 @@ a = Analysis(
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
+    optimize=2,
 )
 
 # Windows executable configuration
@@ -149,7 +150,7 @@ ex = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,  # Windows GUI application (no console)
-    icon=None,  # You can specify an icon file here if available
+    icon='images/mic.ico',
 )
 
 # Create the final executable

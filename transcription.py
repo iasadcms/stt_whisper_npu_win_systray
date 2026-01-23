@@ -12,6 +12,7 @@ import io
 import wave
 import threading
 from openai import OpenAI
+from path_utils import validate_and_prepare_path
 
 
 class NotebookHandler:
@@ -25,22 +26,33 @@ class NotebookHandler:
         self.notebook_path = config["notebook"]["file_path"]
         self.notebook_mode = False
         
-        # Ensure notebook directory exists
-        notebook_dir = os.path.dirname(self.notebook_path)
-        if notebook_dir:
-            os.makedirs(notebook_dir, exist_ok=True)
+        # Validate and prepare notebook path
+        path_valid, validation_message = validate_and_prepare_path(self.notebook_path, self.logger)
+        if not path_valid:
+            self.logger.error(f"Notebook path validation failed: {validation_message}")
+            self.logger.error("Notebook functionality will be disabled")
+            self.notebook_path = None
         else:
-            # If no directory specified, ensure file can be created in current dir
-            open(self.notebook_path, 'a').close()
+            # Ensure notebook directory exists
+            notebook_dir = os.path.dirname(self.notebook_path)
+            if notebook_dir:
+                os.makedirs(notebook_dir, exist_ok=True)
+            else:
+                # If no directory specified, ensure file can be created in current dir
+                try:
+                    open(self.notebook_path, 'a').close()
+                except Exception as e:
+                    self.logger.error(f"Failed to create notebook file: {e}")
+                    self.notebook_path = None
     
     def append_to_notebook(self, text):
         """
         Append transcription text to the notebook file.
-        
+         
         Args:
             text: The transcription text to append
         """
-        if not self.notebook_mode or not text:
+        if not self.notebook_mode or not text or not self.notebook_path:
             return
             
         try:
@@ -132,8 +144,6 @@ class NotebookHandler:
             New notebook mode state (True/False)
         """
         self.notebook_mode = not self.notebook_mode
-        mode_str = "enabled" if self.notebook_mode else "disabled"
-        self.logger.info(f"Notebook mode {mode_str}")
         return self.notebook_mode
     
     def set_notebook_mode(self, enabled):
@@ -144,8 +154,6 @@ class NotebookHandler:
             enabled: Boolean indicating whether to enable notebook mode
         """
         self.notebook_mode = enabled
-        mode_str = "enabled" if self.notebook_mode else "disabled"
-        self.logger.info(f"Notebook mode {mode_str}")
 
 
 class TranscriptionHandler:
@@ -153,9 +161,10 @@ class TranscriptionHandler:
     Handles transcription processing and output.
     """
     
-    def __init__(self, config, logger):
+    def __init__(self, config, logger, app):
         self.config = config
         self.logger = logger
+        self.app = app
         
         # Setup client
         self.client = OpenAI(
@@ -183,6 +192,10 @@ class TranscriptionHandler:
         self.notebook_handler = NotebookHandler(config, logger)
         self.notebook_mode = config["notebook"]["enabled"]
         self.notebook_handler.set_notebook_mode(self.notebook_mode)
+        
+        # Event to signal when transcription output is complete
+        self.transcription_complete = threading.Event()
+        self.transcription_complete.set()
     
     def type_transcription(self, text):
         """
@@ -192,15 +205,28 @@ class TranscriptionHandler:
             text: The transcribed text to type
         """
         if not self.config["output"]["typing_enabled"] or not text:
+            # Signal completion even if typing is disabled or text is empty
+            self.transcription_complete.set()
             return
         
         try:
+            import subprocess
+            import ctypes
+            import time
+            
+            self.logger.debug("type_transcription: START - about to type text")
+            
+            # Get the currently active window handle before any operations
+            user32 = ctypes.windll.user32
+            active_window = user32.GetForegroundWindow()
+            
             # Only flash cursor if recording is still enabled
             # (prevents flashing after user has paused)
             if self.config["visual"]["cursor_flash_enabled"]:
                 flash_count = self.config["visual"]["cursor_flash_count"]
                 flash_duration = self.config["visual"]["cursor_flash_duration"]
                 
+                self.logger.debug(f"type_transcription: Flashing cursor {flash_count} times")
                 for _ in range(flash_count):
                     # Get current cursor position
                     x, y = pyautogui.position()
@@ -209,12 +235,28 @@ class TranscriptionHandler:
                     pyautogui.moveRel(2, 2, duration=flash_duration)
                     pyautogui.moveRel(-2, -2, duration=flash_duration)
             
-            # Type the actual text with configured delay between keystrokes
-            pyautogui.write(text, interval=self.config["output"]["typing_delay"])
-            # Add trailing space so next transcription doesn't stick to this one
-            pyautogui.press('space')
+            # Copy text to clipboard using Windows native command
+            text_with_space = text + " "  # Add trailing space so next transcription doesn't stick
+            self.logger.debug(f"type_transcription: Copying to clipboard: '{text_with_space}'")
+            process = subprocess.Popen(['clip'], stdin=subprocess.PIPE)
+            process.communicate(text_with_space.encode('utf-8'))
+            
+            # Restore focus to the original active window
+            self.logger.debug("type_transcription: Restoring focus to active window")
+            user32.SetForegroundWindow(active_window)
+            time.sleep(0.05)  # Brief delay to ensure focus is restored
+            
+            # Paste from clipboard using Ctrl+V
+            self.logger.debug("type_transcription: Pasting with Ctrl+V")
+            pyautogui.hotkey('ctrl', 'v')
+            self.logger.debug("type_transcription: COMPLETE - text pasted")
+            
+            # Signal that transcription output is complete
+            self.transcription_complete.set()
         except Exception as e:
             self.logger.error(f"Error typing transcription: {e}")
+            # Signal completion even on error to prevent hanging
+            self.transcription_complete.set()
     
     def save_wav(self, data, prefix="chunk"):
         """
@@ -249,6 +291,11 @@ class TranscriptionHandler:
             audio_chunk_counter: Counter for audio chunk numbering
             audio_chunk_lock: Lock for thread-safe counter access
         """
+        self.logger.debug("process_audio_chunk: START - processing audio chunk")
+        
+        # Clear the completion event at the start of each transcription cycle
+        self.transcription_complete.clear()
+        
         # Handle save-audio-only mode
         if save_audio_only:
             if audio_chunk_counter and audio_chunk_lock:
@@ -289,6 +336,8 @@ class TranscriptionHandler:
                 # Filter hallucinations
                 if text.lower() in self.config["filters"]["hallucinations"]:
                     self.logger.info(f"Filtered: {text}")
+                    # Signal completion even for filtered text
+                    self.transcription_complete.set()
                 else:
                     # Log transcription text if enabled
                     if self.config["output"]["log_transcription_text"]:
@@ -305,10 +354,20 @@ class TranscriptionHandler:
                     # Handle output based on mode
                     if self.notebook_mode:
                         # Append to notebook
+                        self.logger.debug(f"process_audio_chunk: Appending to notebook: '{text}'")
                         self.notebook_handler.append_to_notebook(text)
+                        self.logger.debug(f"process_audio_chunk: COMPLETE - appended to notebook")
+                        # Signal that transcription output is complete
+                        self.transcription_complete.set()
                     else:
                         # Type to active window (existing behavior)
+                        self.logger.debug(f"process_audio_chunk: About to type transcription: '{text}'")
                         self.type_transcription(text)
+                        # Note: transcription_complete is set by type_transcription() after paste completes
+            else:
+                # No text received - signal completion anyway
+                self.logger.debug("process_audio_chunk: No text received from transcription")
+                self.transcription_complete.set()
 
         except Exception as e:
             # Enhanced error reporting for translation endpoint issues
@@ -323,6 +382,9 @@ class TranscriptionHandler:
                     self.logger.error(f"Translation endpoint error: {e}")
             else:
                 self.logger.error(f"API Error: {e}")
+            
+            # Signal completion even on error to prevent hanging
+            self.transcription_complete.set()
     
     def toggle_notebook_mode(self):
         """

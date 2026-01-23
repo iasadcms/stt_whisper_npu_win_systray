@@ -15,6 +15,7 @@ import os
 import io
 import time
 import numpy as np
+from path_utils import validate_directory_path
 
 
 def list_audio_devices():
@@ -99,12 +100,20 @@ class AudioProcessor:
     def save_wav(self, data, prefix="chunk"):
         """
         Save audio data to WAV file for debugging purposes.
-        
+         
         Args:
             data: Raw audio bytes to save
             prefix: Filename prefix (default: "chunk")
         """
         if not self.config["output"]["save_wav_files"]:
+            return
+        
+        # Validate WAV directory exists and is writable
+        wav_dir = self.config["output"]["wav_dir"]
+        dir_valid, validation_message = validate_directory_path(wav_dir, self.logger)
+        
+        if not dir_valid:
+            self.logger.error(f"Cannot save WAV file: {validation_message}")
             return
         
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -113,41 +122,55 @@ class AudioProcessor:
             f"{prefix}_{timestamp}.wav"
         )
         
-        with wave.open(filename, 'wb') as wf:
-            wf.setnchannels(1)  # Mono audio
-            wf.setsampwidth(2)  # 16-bit audio (2 bytes)
-            wf.setframerate(self.config["audio"]["rate"])
-            wf.writeframes(data)
+        try:
+            with wave.open(filename, 'wb') as wf:
+                wf.setnchannels(1)  # Mono audio
+                wf.setsampwidth(2)  # 16-bit audio (2 bytes)
+                wf.setframerate(self.config["audio"]["rate"])
+                wf.writeframes(data)
+        except Exception as e:
+            self.logger.error(f"Error saving WAV file {filename}: {e}")
     
     def save_audio_chunk(self, data, chunk_number):
         """
         Save audio chunk to disk for later processing.
-        
+         
         Args:
             data: Raw audio bytes to save
             chunk_number: Sequential number for ordering
         """
+        # Validate temp audio directory exists and is writable
+        dir_valid, validation_message = validate_directory_path(self.temp_audio_dir, self.logger)
+        
+        if not dir_valid:
+            self.logger.error(f"Cannot save audio chunk: {validation_message}")
+            return
+        
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         filename = os.path.join(
             self.temp_audio_dir,
             f"chunk_{chunk_number}_{timestamp}.wav"
         )
         
-        with wave.open(filename, 'wb') as wf:
-            wf.setnchannels(1)  # Mono audio
-            wf.setsampwidth(2)  # 16-bit audio (2 bytes)
-            wf.setframerate(self.config["audio"]["rate"])
-            wf.writeframes(data)
-        
-        self.logger.info(f"Saved audio chunk: {filename}")
+        try:
+            with wave.open(filename, 'wb') as wf:
+                wf.setnchannels(1)  # Mono audio
+                wf.setsampwidth(2)  # 16-bit audio (2 bytes)
+                wf.setframerate(self.config["audio"]["rate"])
+                wf.writeframes(data)
+            
+            self.logger.info(f"Saved audio chunk: {filename}")
+        except Exception as e:
+            self.logger.error(f"Error saving audio chunk {filename}: {e}")
     
     def record_vad(self, running, save_audio_only=False):
         """Continuous VAD recording with seamless audio capture."""
         self.restart_stream()
-
+        
         self.logger.info(f"Listening on device {self.current_device}...")
-
-        frames = []
+        
+        # Store frames as instance variable so force_flush_audio can access it
+        self.frames = []
         silent_chunks = 0
         is_speaking = False
 
@@ -178,7 +201,7 @@ class AudioProcessor:
                     if self.hard_stop_flag:
                         self.logger.info("Hard stop detected - clearing current buffer")
                         with self.frames_lock:
-                            frames = []
+                            self.frames = []
                             is_speaking = False
                             silent_chunks = 0
                         self.hard_stop_flag = False
@@ -194,7 +217,7 @@ class AudioProcessor:
                     # Only process if recording is enabled
                     if self.recording_enabled.is_set():
                         with self.frames_lock:
-                            frames.append(data)
+                            self.frames.append(data)
 
                         # Check volume level - convert bytes back to numpy array for analysis
                         audio_array = np.frombuffer(data, dtype='int16')
@@ -216,7 +239,7 @@ class AudioProcessor:
                         send_reason = ""
 
                         # Send if force flush is requested
-                        if self.force_flush_flag and frames:
+                        if self.force_flush_flag and self.frames:
                             should_send = True
                             send_reason = "force flush requested"
                         # Or send if we detected speech and then enough silence
@@ -224,15 +247,15 @@ class AudioProcessor:
                             should_send = True
                             send_reason = f"silence after speech ({silent_chunks} silent chunks)"
                         # Or send if buffer is full
-                        elif len(frames) >= buffer_limit:
+                        elif len(self.frames) >= buffer_limit:
                             should_send = True
-                            send_reason = f"buffer full ({len(frames)} chunks)"
+                            send_reason = f"buffer full ({len(self.frames)} chunks)"
 
-                        if should_send and frames:
+                        if should_send and self.frames:
                             # Send audio to queue for processing
                             with self.frames_lock:
-                                audio_data = b''.join(frames)
-                                frames_count = len(frames)
+                                audio_data = b''.join(self.frames)
+                                frames_count = len(self.frames)
                             
                             self.audio_queue.put(audio_data)
 
@@ -250,7 +273,7 @@ class AudioProcessor:
 
                             # Reset for next segment
                             with self.frames_lock:
-                                frames = []
+                                self.frames = []
                             is_speaking = False
                             silent_chunks = 0
                             # Reset force flush flag after handling
@@ -258,9 +281,9 @@ class AudioProcessor:
                                 self.force_flush_flag = False
                     else:
                         # If recording is disabled, clear any accumulated frames
-                        if frames:
+                        if self.frames:
                             with self.frames_lock:
-                                frames = []
+                                self.frames = []
                             is_speaking = False
                             silent_chunks = 0
                         time.sleep(0.01)
@@ -275,15 +298,36 @@ class AudioProcessor:
             self.logger.error(f"Recording error: {e}")
         finally:
             # Send any remaining audio (but not if hard stop was triggered)
-            if frames and not self.hard_stop_flag:
+            if self.frames and not self.hard_stop_flag:
                 with self.frames_lock:
-                    self.audio_queue.put(b''.join(frames))
+                    self.audio_queue.put(b''.join(self.frames))
+            
+            # Clear the audio buffer to prevent overflow
+            while not self.audio_buffer.empty():
+                try:
+                    self.audio_buffer.get_nowait()
+                except queue.Empty:
+                    break
+            
+            # Clear any remaining frames
+            with self.frames_lock:
+                self.frames = []
+            
             self.logger.info("Audio recording thread stopped")
     
     def force_flush_audio(self):
         """Force flush any accumulated audio frames to the queue."""
         self.force_flush_flag = True
         self.logger.info("Force flush audio flag set")
+        
+        # Immediately flush current frames if recording is enabled
+        if self.recording_enabled.is_set():
+            with self.frames_lock:
+                if hasattr(self, 'frames') and self.frames:
+                    audio_data = b''.join(self.frames)
+                    self.frames = []  # Clear the frames buffer
+                    self.audio_queue.put(audio_data)
+                    self.logger.info(f"Force flushed {len(audio_data)} bytes to queue")
     
     def hard_stop(self):
         """Hard stop - immediately discard current buffer and clear audio queue."""
@@ -304,3 +348,17 @@ class AudioProcessor:
         if self.stream:
             self.stream.stop()
             self.stream.close()
+            self.stream = None
+        
+        # Clear the audio buffer
+        while not self.audio_buffer.empty():
+            try:
+                self.audio_buffer.get_nowait()
+            except queue.Empty:
+                break
+        
+        # Clear any remaining frames
+        with self.frames_lock:
+            self.frames = []
+        
+        self.logger.info("Audio resources cleaned up")

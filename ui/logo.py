@@ -12,8 +12,8 @@ from PIL import Image, ImageDraw
 # =============================================
 
 # Recording state colors (fade between these)
-RECORDING_BASE_COLOR = (180, 50, 50)    # Darker red
-RECORDING_GLOW_COLOR = (255, 100, 100)  # Brighter red/orange
+RECORDING_BASE_COLOR = (100, 20, 20)    # Much darker red for stronger contrast
+RECORDING_GLOW_COLOR = (255, 80, 80)    # Brighter red for more visible glow
 
 # Idle state colors
 IDLE_COLOR = (100, 200, 100)            # Green
@@ -26,7 +26,7 @@ GLOW_PAUSE_DURATION = 0.25               # Pause duration at peak and trough
 # Number of distinct color shades during fade
 GLOW_SHADES = 10
 
-def create_built_in_microphone_icon(size=64, color=(0, 120, 215), outline=(0, 80, 160), recording=False, glow_phase=0.0):
+def create_built_in_microphone_icon(size=64, color=(0, 120, 215), outline=(0, 80, 160), recording=False, glow_phase=0.0, custom_color=None):
     """
     Create a built-in microphone icon using the previously designed
     rounded microphone shape.
@@ -37,6 +37,7 @@ def create_built_in_microphone_icon(size=64, color=(0, 120, 215), outline=(0, 80
         outline: Outline color (RGB tuple)
         recording: Whether recording is active (for color selection)
         glow_phase: Phase for glowing effect (0.0 to 1.0)
+        custom_color: Optional custom color tuple (RGB) to override default colors
 
     Returns:
         PIL Image of microphone icon
@@ -52,9 +53,14 @@ def create_built_in_microphone_icon(size=64, color=(0, 120, 215), outline=(0, 80
     # Microphone head (rounded rectangle)
     # Use brighter, more visible colors
     if recording:
-        # Glowing effect between two shades with greater range
-        base_color = RECORDING_BASE_COLOR  # Darker base color
-        glow_color = RECORDING_GLOW_COLOR  # Much brighter glow color
+        # If custom color provided, use it with glow effect
+        if custom_color:
+            base_color = tuple(int(c * 0.7) for c in custom_color)  # Darker base
+            glow_color = custom_color  # Brighter glow
+        else:
+            # Glowing effect between two shades with greater range
+            base_color = RECORDING_BASE_COLOR  # Darker base color
+            glow_color = RECORDING_GLOW_COLOR  # Much brighter glow color
 
         # Use a smoother curve for the glow effect (ease-in-out)
         # Apply easing function to make transition smoother

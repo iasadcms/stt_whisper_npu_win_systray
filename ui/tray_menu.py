@@ -51,18 +51,21 @@ class TrayMenu:
     
     def create_output_mode_menu(self):
         """Create submenu for output mode selection."""
+        recording_active = self.app.recording_enabled.is_set()
         return Menu(
             MenuItem(
                 "Type to Active Window",
                 lambda: self.app.set_notebook_mode(False),
                 checked=lambda item: not self.app.notebook_mode,
-                radio=True
+                radio=True,
+                enabled=not recording_active
             ),
             MenuItem(
                 "Append to Notebook",
                 lambda: self.app.set_notebook_mode(True),
                 checked=lambda item: self.app.notebook_mode,
-                radio=True
+                radio=True,
+                enabled=not recording_active
             )
         )
     

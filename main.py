@@ -18,7 +18,10 @@ from PIL import ImageDraw
 # Import our modules
 from config import load_config, save_config
 from logging_setup import setup_logging
+from path_utils import resolve_relative_path, get_script_dir, resolve_process_relative_path
 from ui import load_logo, create_icon_image, VisualIndicators, TrayMenu
+from ui.icon_effects import IconEffects
+from ui.hotkey_monitor import HotkeyMonitor
 from audio import AudioProcessor, list_audio_devices
 from transcription import TranscriptionHandler, api_worker
 
@@ -44,6 +47,15 @@ class TranscriptionApp:
         self.current_device = self.config["audio"]["device_index"]
         self.save_audio_only = save_audio_only
         
+        # Endpoint health state
+        self.endpoint_healthy = True
+        self.last_successful_send_time = 0.0
+        self.poll_lock = threading.Lock()
+        
+        # Buffer draining state
+        self.buffer_draining = threading.Event()
+        self.buffer_monitor_thread = None
+        
         # Counter for audio chunk numbering (using list to allow modification in threads)
         self.audio_chunk_counter = [0]
         self.audio_chunk_lock = threading.Lock()
@@ -51,6 +63,7 @@ class TranscriptionApp:
         # Icon update throttling
         self.icon_update_lock = threading.Lock()
         self.last_icon_state = None
+        self.last_icon_color = None
         self.icon_update_pending = False
         
         # Initialize components
@@ -60,26 +73,77 @@ class TranscriptionApp:
             self.recording_enabled,
             self.logger
         )
-        
-        self.transcription_handler = TranscriptionHandler(self.config, self.logger)
-        
+
+        self.transcription_handler = TranscriptionHandler(self.config, self.logger, self)
+
         # Notebook state
         self.notebook_mode = self.config["notebook"]["enabled"]
-        
+
         # Load UI components
         self.logo, self.gray_logo = load_logo()
         self.visual_indicators = VisualIndicators(self.config)
         self.visual_indicators.set_notebook_mode(self.notebook_mode)
+        self.visual_indicators.set_buffer_draining(False)  # Ensure buffer draining is initially false
+        self.visual_indicators.set_endpoint_checking(False)  # Ensure endpoint checking is initially false
         self.tray_menu = TrayMenu(self)
-        
+
+        # Initialize icon effects
+        self.icon_effects = IconEffects(self)
+
+        # Initialize hotkey monitor
+        self.hotkey_monitor = HotkeyMonitor(self.config, self, self.logger)
+
         # Tray icon
         self.icon = None
-        self.glow_phase = 0.0
-        self.glow_direction = 0.1111  # Step size for 10 shades over fade (1.0 / 9 steps)
-        self.glow_timer = None
-        self.glow_active = False
-        self.glow_pause_counter = 0  # Counter for pause duration
-        self.glow_pause_frames = 10  # 10 frames * 25ms = 250ms pause
+    
+    def start_buffer_monitor(self):
+        """Start monitoring buffer draining state."""
+        def buffer_monitor_loop():
+            # Give the app a moment to fully initialize
+            time.sleep(1)
+
+            while self.running.is_set():
+                # Check if recording is paused (draining state)
+                recording_paused = not self.recording_enabled.is_set()
+                # Check if there are items in queue OR if transcription is still processing
+                has_buffer_items = not self.audio_queue.empty()
+                transcription_in_progress = not self.transcription_handler.transcription_complete.is_set()
+
+                # Buffer is draining if: recording is paused AND (queue has items OR transcription is in progress)
+                should_be_draining = recording_paused and (has_buffer_items or transcription_in_progress)
+
+                if should_be_draining:
+                    if not self.buffer_draining.is_set():
+                        self.buffer_draining.set()
+                        self.visual_indicators.set_buffer_draining(True)
+                        # Only start glow effect if we're actually recording or have items to process
+                        if self.recording_enabled.is_set() or has_buffer_items or transcription_in_progress:
+                            self.icon_effects.start_glow_effect()
+                        self.logger.info("[BUFFER] Buffer draining STARTED")
+                        self.icon_effects.update_icon()  # Update icon when buffer draining starts
+                else:
+                    if self.buffer_draining.is_set():
+                        self.buffer_draining.clear()
+                        self.visual_indicators.set_buffer_draining(False)
+                        self.icon_effects.stop_glow_effect()
+                        self.logger.info("[BUFFER] Buffer draining STOPPED")
+                        self.icon_effects.update_icon()  # Update icon when buffer draining stops
+
+                        # If recording is still paused and buffer is empty, clear all visualizations
+                        if recording_paused and not has_buffer_items and not transcription_in_progress:
+                            if hasattr(self, 'visual_indicators') and self.visual_indicators.indicator_thread and self.visual_indicators.indicator_thread.is_alive():
+                                self.logger.info("[BUFFER] Clearing visualizations - buffer empty and recording paused")
+                                self.visual_indicators.stop_recording_indicator()
+                                self.visual_indicators.stop_animation()
+
+                # Update buffer items state for visual indicators
+                self.visual_indicators.set_has_buffer_items(has_buffer_items)
+
+                time.sleep(0.1)
+
+        if not self.buffer_monitor_thread or not self.buffer_monitor_thread.is_alive():
+            self.buffer_monitor_thread = threading.Thread(target=buffer_monitor_loop, daemon=True)
+            self.buffer_monitor_thread.start()
     
     def open_config(self, icon=None, item=None):
         """Open configuration file in default editor."""
@@ -112,9 +176,9 @@ class TranscriptionApp:
     def open_app_logs(self, icon=None, item=None):
         """Open application logs directory."""
         try:
-            # Application logs are stored in the dist directory
-            dist_dir = os.path.join(os.path.dirname(__file__), 'dist')
-            os.startfile(dist_dir)
+            # Application logs are stored in the process directory (same as executable)
+            log_dir = resolve_process_relative_path('')
+            os.startfile(log_dir)
         except Exception as e:
             self.logger.error(f"Error opening application logs: {e}")
     
@@ -151,15 +215,27 @@ HOTKEYS:
 CONFIGURATION:
 Edit transcription_config.json to customize settings. For example, Notebook path, Hotkeys, API endpoints, ...
 
+VISUAL INDICATORS:
+- Red cursor indicator: Recording to active window
+- Blue cursor indicator: Recording to notebook
+- Yellow cursor indicator: Buffer is draining (processing queue)
+- Orange cursor indicator: API endpoint is unavailable (recording continues, audio is saved)
+- Bright Red cursor indicator: API endpoint is being checked (background monitoring)
+- Tray icon color matches the cursor indicator color
+
 USAGE TIPS:
 - When recording is paused, the queue continues processing. The mouse cursor will indicate processing is occuring.
 - Use "Stop Recording and Clear Queue" to immediately stop recording, and clear pending items.
 - Audio files are saved in temp_audio/ directory
 - Logs are stored in transcription_logs/ directory
+- If the cursor turns orange, the API endpoint is unavailable but recording continues
+- If the cursor turns bright red, the application is checking API endpoint health
 
 TROUBLESHOOTING:
-- If API endpoint is unavailable, transcriptions will be logged as errors
-- Queue items are processed in order and logged appropriately"""
+- If API endpoint is unavailable (orange indicator), transcriptions will be saved for later processing
+- Queue items are processed in order and logged appropriately
+- Check your API endpoint configuration if orange indicator persists
+- The application automatically checks endpoint health periodically and adjusts recording behavior accordingly"""
 
         # Format with actual hotkey values from config
         formatted_help = help_message.format(
@@ -198,7 +274,18 @@ TROUBLESHOOTING:
             if self.save_audio_only:
                 return
 
+            # Track consecutive failures for aggressive polling
+            consecutive_failures = 0
+            max_consecutive_failures = 3
+
+            # Initial endpoint check
+            time.sleep(2)  # Give the app a moment to fully initialize
+
             while self.running.is_set():
+                # Show red indicator while checking endpoint
+                self.visual_indicators.set_endpoint_checking(True)
+                self.icon_effects.update_icon()
+
                 try:
                     # Simple health check - try to connect to the endpoint
                     test_url = f"{self.config['api']['base_url']}/models"
@@ -209,118 +296,84 @@ TROUBLESHOOTING:
                     )
 
                     if response.status_code == 200:
-                        if not hasattr(self, 'endpoint_healthy') or not self.endpoint_healthy:
+                        if not self.endpoint_healthy:
                             self.endpoint_healthy = True
                             self.logger.info("API endpoint health restored")
                             # Update visual indicator to show healthy state
                             self.visual_indicators.set_endpoint_status(True)
+                            consecutive_failures = 0
+                        else:
+                            # Endpoint is still healthy, just update to clear checking state
+                            self.visual_indicators.set_endpoint_checking(False)
                     else:
-                        if not hasattr(self, 'endpoint_healthy') or self.endpoint_healthy:
+                        if self.endpoint_healthy:
                             self.endpoint_healthy = False
                             self.logger.warning(f"API endpoint health check failed: HTTP {response.status_code}")
                             self.visual_indicators.set_endpoint_status(False)
+                            consecutive_failures += 1
+                        else:
+                            consecutive_failures += 1
 
                 except Exception as e:
-                    if not hasattr(self, 'endpoint_healthy') or self.endpoint_healthy:
+                    if self.endpoint_healthy:
                         self.endpoint_healthy = False
                         self.logger.warning(f"API endpoint health check failed: {e}")
                         self.visual_indicators.set_endpoint_status(False)
+                        consecutive_failures += 1
+                    else:
+                        consecutive_failures += 1
 
-                # Check every 30 seconds
-                time.sleep(30)
+                # Clear checking state
+                self.visual_indicators.set_endpoint_checking(False)
+                self.logger.debug(f"API endpoint checking: Complete - {test_url}")
+                self.icon_effects.update_icon()
+
+                # Adjust polling frequency based on endpoint health
+                if self.endpoint_healthy:
+                    # Normal polling when healthy - every 30 seconds
+                    time.sleep(30)
+                else:
+                    # Aggressive polling when endpoint is down
+                    # Start with 5 seconds, increase up to 30 seconds
+                    poll_interval = min(5 * (consecutive_failures + 1), 30)
+                    time.sleep(poll_interval)
+
+                # If endpoint is down and we're recording, handle it
+                if not self.endpoint_healthy and self.recording_enabled.is_set():
+                    self.handle_endpoint_failure_during_recording()
 
         # Start the monitor thread
         monitor_thread = threading.Thread(target=endpoint_monitor_loop, daemon=True)
         monitor_thread.start()
+
+    def handle_endpoint_failure_during_recording(self):
+        """Handle endpoint failure when recording is active."""
+        if not self.endpoint_healthy and self.recording_enabled.is_set():
+            self.logger.warning("Endpoint failure detected during recording - stopping recording")
+
+            # Stop recording gracefully
+            self.recording_enabled.clear()
+
+            # Force flush any accumulated audio
+            self.audio_processor.force_flush_audio()
+
+            # Stop visual indicators
+            if hasattr(self, 'visual_indicators') and self.visual_indicators.indicator_thread and self.visual_indicators.indicator_thread.is_alive():
+                self.visual_indicators.stop_recording_indicator()
+                self.visual_indicators.stop_animation()
+
+            # Stop glow effect
+            self.icon_effects.stop_glow_effect()
+
+            # Update icon to show endpoint unavailable state
+            self.icon_effects.update_icon()
+
+            self.logger.info("Recording stopped due to endpoint failure - audio saved for later processing")
     
-    def update_icon(self):
-        """Update the tray icon to reflect recording state (throttled)."""
-        if not self.icon:
-            return
-            
-        current_state = self.recording_enabled.is_set()
-        
-        # Only update if state actually changed
-        with self.icon_update_lock:
-            if self.last_icon_state == current_state:
-                return
-            self.last_icon_state = current_state
-        
-        # Schedule icon update in a separate thread to avoid blocking
-        def delayed_update():
-            try:
-                self.icon.icon = create_icon_image(
-                    self.logo,
-                    self.gray_logo,
-                    current_state
-                )
-            except Exception as e:
-                # Silently ignore icon update errors - they're not critical
-                pass
-        
-        threading.Thread(target=delayed_update, daemon=True).start()
-
-    def update_glowing_icon(self):
-        """Update the tray icon with glowing effect for recording state."""
-        if self.icon and self.recording_enabled.is_set():
-            # Handle pause at peak and trough
-            if self.glow_pause_counter > 0:
-                self.glow_pause_counter -= 1
-                return  # Skip color update during pause
-
-            # Update glow phase for next frame
-            self.glow_phase += self.glow_direction
-            if self.glow_phase >= 1.0:
-                self.glow_phase = 1.0
-                self.glow_direction = -0.1111  # Reverse direction with same step size
-                self.glow_pause_counter = self.glow_pause_frames  # Start pause at peak
-            elif self.glow_phase <= 0.0:
-                self.glow_phase = 0.0
-                self.glow_direction = 0.1111  # Forward direction with same step size
-                self.glow_pause_counter = self.glow_pause_frames  # Start pause at trough
-
-            # Update icon on every frame for maximum smoothness
-            try:
-                # Import here to avoid circular imports
-                from ui.logo import create_built_in_microphone_icon
-
-                # Create icon with current glow phase
-                glow_icon = create_built_in_microphone_icon(recording=True, glow_phase=self.glow_phase)
-
-                # Add recording indicator
-                draw = ImageDraw.Draw(glow_icon)
-                draw.ellipse([52, 4, 62, 14], fill=(255, 50, 50), outline=(200, 0, 0), width=1)
-
-                self.icon.icon = glow_icon
-            except Exception as e:
-                # If icon update fails, just continue - don't crash the glow effect
-                pass
-
-    def start_glow_effect(self):
-        """Start the glowing icon effect."""
-        if not self.glow_active and self.recording_enabled.is_set():
-            self.glow_active = True
-            self.glow_phase = 0.0
-            self.glow_direction = 0.05  # Adjusted step size for 10 FPS (1.0 / 20 frames)
-
-            # Start timer to update icon periodically
-            def glow_update_loop():
-                while self.glow_active and self.recording_enabled.is_set() and self.running.is_set():
-                    self.update_glowing_icon()
-                    time.sleep(0.15)  # Increased to 150ms for maximum keyboard compatibility
-
-            self.glow_timer = threading.Thread(target=glow_update_loop, daemon=True)
-            self.glow_timer.start()
-
-    def stop_glow_effect(self):
-        """Stop the glowing icon effect."""
-        self.glow_active = False
-        if self.glow_timer:
-            self.glow_timer.join(timeout=0.5)  # Give it a chance to stop
-            self.glow_timer = None
-        # Reset to normal recording icon
-        if self.recording_enabled.is_set():
-            self.update_icon()
+    def get_current_indicator_color(self):
+        """Get the current visual indicator color based on state."""
+        return self.visual_indicators.get_current_color()
+    
     
     def toggle_recording(self, icon=None, item=None):
         """Toggle recording on/off."""
@@ -340,26 +393,52 @@ TROUBLESHOOTING:
                 while not self.audio_queue.empty() and (time.time() - start_time) < timeout:
                     time.sleep(0.1)
 
-                if time.time() - start_time >= timeout:
-                    self.logger.warning("Queue wait timeout - forcing stop")
-
-                # Now play the stop animation and stop indicator
-                self.visual_indicators.stop_recording_indicator()
-                self.visual_indicators.stop_animation()
-                self.logger.info("Queue emptied - recording fully stopped")
+                elapsed = time.time() - start_time
+                if elapsed >= timeout:
+                    self.logger.warning(f"Queue wait timeout ({elapsed:.1f}s) - forcing stop")
+                
+                # Wait for transcription output to complete (typing/notebook write)
+                # This ensures visual indicators stay visible until the very last output is done
+                transcription_timeout = 5.0  # Maximum 5 seconds to wait for transcription output
+                transcription_start = time.time()
+                
+                while not self.transcription_handler.transcription_complete.is_set() and (time.time() - transcription_start) < transcription_timeout:
+                    time.sleep(0.05)
+                
+                transcription_elapsed = time.time() - transcription_start
+                if transcription_elapsed >= transcription_timeout:
+                    self.logger.warning(f"Transcription output timeout ({transcription_elapsed:.1f}s) - forcing stop")
+                
+                # Only stop visual indicators if they were actually running AND buffer is not draining
+                if hasattr(self, 'visual_indicators') and self.visual_indicators.indicator_thread and self.visual_indicators.indicator_thread.is_alive():
+                    # Check if buffer is still draining
+                    if not self.buffer_draining.is_set():
+                        self.logger.info("wait_and_stop: Stopping visual indicators")
+                        self.visual_indicators.stop_recording_indicator()
+                        self.visual_indicators.stop_animation()
+                        self.icon_effects.stop_glow_effect()
+                        self.logger.info("Queue emptied and transcription complete - recording fully stopped")
+                        # Ensure recording is stopped when buffer draining completes
+                        self.recording_enabled.clear()
+                    else:
+                        self.logger.info("Buffer still draining - keeping visual indicators and glow active")
+                else:
+                    self.logger.info("Queue emptied - no active visual indicators to stop")
                 
                 # Update icon after animations complete
-                self.update_icon()
+                self.icon_effects.update_icon()
 
             threading.Thread(target=wait_and_stop, daemon=True).start()
         else:
-            # Starting - play expand animation then start indicator
+            # Starting - clear buffer draining, play expand animation then start indicator
+            self.buffer_draining.clear()
+            self.visual_indicators.set_buffer_draining(False)
             self.recording_enabled.set()
             self.logger.info("Recording RESUMED")
             self.visual_indicators.start_animation()
             self.visual_indicators.start_recording_indicator()
-            self.start_glow_effect()
-            self.update_icon()
+            self.icon_effects.start_glow_effect()
+            self.icon_effects.update_icon()
 
         # Update menu to reflect new recording state
         if self.icon:
@@ -383,6 +462,9 @@ TROUBLESHOOTING:
     def stop_and_clear(self, icon=None, item=None):
         """Stop recording and clear queue."""
         self.recording_enabled.clear()
+        self.buffer_draining.clear()
+        self.visual_indicators.set_buffer_draining(False)
+        self.icon_effects.stop_glow_effect()
         self.logger.info("Recording STOPPED and cleared")
 
         # Clear queue immediately (don't wait)
@@ -393,12 +475,12 @@ TROUBLESHOOTING:
             except queue.Empty:
                 break
 
-        # Stop indicator and play collapse animation
-        self.visual_indicators.stop_recording_indicator()
-        self.visual_indicators.stop_animation()
-        self.stop_glow_effect()
+        # Stop indicator and play collapse animation only if they are running
+        if hasattr(self, 'visual_indicators') and self.visual_indicators.indicator_thread and self.visual_indicators.indicator_thread.is_alive():
+            self.visual_indicators.stop_recording_indicator()
+            self.visual_indicators.stop_animation()
 
-        self.update_icon()
+        self.icon_effects.update_icon()
         
         # Update menu to reflect new recording state
         if self.icon:
@@ -414,13 +496,16 @@ TROUBLESHOOTING:
     def hard_stop(self, icon=None, item=None):
         """Hard stop - cancel everything, delete recordings, send nothing."""
         self.logger.info("HARD STOP - Canceling all operations")
-        
+         
         # Immediately stop recording
         self.recording_enabled.clear()
-        
+        self.buffer_draining.clear()
+        self.visual_indicators.set_buffer_draining(False)
+        self.icon_effects.stop_glow_effect()
+         
         # Signal audio processor to hard stop
         self.audio_processor.hard_stop()
-        
+         
         # Clear the queue completely
         cleared_count = 0
         while not self.audio_queue.empty():
@@ -430,16 +515,16 @@ TROUBLESHOOTING:
                 cleared_count += 1
             except queue.Empty:
                 break
-        
+         
         self.logger.info(f"Hard stop: Cleared {cleared_count} pending items from queue")
-        
-        # Stop all visual indicators immediately
-        self.visual_indicators.stop_recording_indicator()
-        self.visual_indicators.stop_animation()
-        self.stop_glow_effect()
+         
+        # Stop all visual indicators immediately only if they are running
+        if hasattr(self, 'visual_indicators') and self.visual_indicators.indicator_thread and self.visual_indicators.indicator_thread.is_alive():
+            self.visual_indicators.stop_recording_indicator()
+            self.visual_indicators.stop_animation()
         
         # Update icon
-        self.update_icon()
+        self.icon_effects.update_icon()
         
         # Update menu
         if self.icon:
@@ -480,156 +565,13 @@ TROUBLESHOOTING:
         # Signal worker to stop
         self.audio_queue.put(None)
         
+        # Stop hotkey monitor
+        self.hotkey_monitor.stop()
+        
         # Stop icon
         if self.icon:
             self.icon.stop()
     
-    def hotkey_monitor(self):
-        """Monitor for hotkey presses using Windows native hotkey API."""
-        import ctypes
-        from ctypes import wintypes
-        
-        # Check if submit hotkey exists in config, if not use a default
-        submit_hotkey = self.config['hotkeys'].get('submit', 'ctrl+shift+f3')
-
-        self.logger.info(f"Hotkey monitoring started: {self.config['hotkeys']['toggle']} to toggle, "
-                        f"{self.config['hotkeys']['stop']} to stop, {submit_hotkey} to submit")
-
-        # Windows API constants
-        MOD_ALT = 0x0001
-        MOD_CONTROL = 0x0002
-        MOD_SHIFT = 0x0004
-        MOD_WIN = 0x0008
-        WM_HOTKEY = 0x0312
-        
-        # Virtual key codes for function keys
-        VK_F1 = 0x70
-        VK_F2 = 0x71
-        VK_F3 = 0x72
-        VK_F4 = 0x73
-        VK_F5 = 0x74
-        VK_F6 = 0x75
-        VK_F7 = 0x76
-        VK_F8 = 0x77
-        VK_F9 = 0x78
-        VK_F10 = 0x79
-        VK_F11 = 0x7A
-        VK_F12 = 0x7B
-        VK_TILDE = 0xC0  # Backtick/tilde key
-        
-        def parse_hotkey(hotkey_str):
-            """Parse hotkey string into Windows modifier and virtual key code."""
-            parts = [part.strip().lower() for part in hotkey_str.split('+')]
-            modifiers = 0
-            vk_code = 0
-            
-            for part in parts:
-                if part == 'ctrl':
-                    modifiers |= MOD_CONTROL
-                elif part == 'shift':
-                    modifiers |= MOD_SHIFT
-                elif part == 'alt':
-                    modifiers |= MOD_ALT
-                elif part == 'win':
-                    modifiers |= MOD_WIN
-                elif part == 'f1':
-                    vk_code = VK_F1
-                elif part == 'f2':
-                    vk_code = VK_F2
-                elif part == 'f3':
-                    vk_code = VK_F3
-                elif part == 'f4':
-                    vk_code = VK_F4
-                elif part == 'f5':
-                    vk_code = VK_F5
-                elif part == 'f6':
-                    vk_code = VK_F6
-                elif part == 'f7':
-                    vk_code = VK_F7
-                elif part == 'f8':
-                    vk_code = VK_F8
-                elif part == 'f9':
-                    vk_code = VK_F9
-                elif part == 'f10':
-                    vk_code = VK_F10
-                elif part == 'f11':
-                    vk_code = VK_F11
-                elif part == 'f12':
-                    vk_code = VK_F12
-                elif part in ['`', 'backtick', 'tilde']:
-                    vk_code = VK_TILDE
-                elif len(part) == 1:
-                    # Single character - convert to virtual key code
-                    vk_code = ord(part.upper())
-            
-            return modifiers, vk_code
-        
-        # Parse hotkeys
-        toggle_mod, toggle_vk = parse_hotkey(self.config['hotkeys']['toggle'])
-        stop_mod, stop_vk = parse_hotkey(self.config['hotkeys']['stop'])
-        submit_mod, submit_vk = parse_hotkey(submit_hotkey)
-        
-        # Hotkey IDs
-        HOTKEY_TOGGLE = 1
-        HOTKEY_STOP = 2
-        HOTKEY_SUBMIT = 3
-        
-        # Windows API functions
-        user32 = ctypes.windll.user32
-        
-        # Register hotkeys
-        try:
-            if not user32.RegisterHotKey(None, HOTKEY_TOGGLE, toggle_mod, toggle_vk):
-                self.logger.error(f"Failed to register toggle hotkey: {self.config['hotkeys']['toggle']}")
-            else:
-                self.logger.info(f"Registered toggle hotkey: {self.config['hotkeys']['toggle']}")
-            
-            if not user32.RegisterHotKey(None, HOTKEY_STOP, stop_mod, stop_vk):
-                self.logger.error(f"Failed to register stop hotkey: {self.config['hotkeys']['stop']}")
-            else:
-                self.logger.info(f"Registered stop hotkey: {self.config['hotkeys']['stop']}")
-            
-            if not user32.RegisterHotKey(None, HOTKEY_SUBMIT, submit_mod, submit_vk):
-                self.logger.error(f"Failed to register submit hotkey: {submit_hotkey}")
-            else:
-                self.logger.info(f"Registered submit hotkey: {submit_hotkey}")
-            
-            # Message loop to process hotkey events
-            msg = wintypes.MSG()
-            while self.running.is_set():
-                # Non-blocking peek at message queue
-                if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):  # PM_REMOVE = 1
-                    if msg.message == WM_HOTKEY:
-                        hotkey_id = msg.wParam
-                        
-                        if hotkey_id == HOTKEY_TOGGLE:
-                            self.logger.debug("Toggle hotkey pressed")
-                            threading.Thread(target=self.toggle_recording, daemon=True).start()
-                        elif hotkey_id == HOTKEY_STOP:
-                            self.logger.debug("Stop hotkey pressed")
-                            threading.Thread(target=self.hard_stop, daemon=True).start()
-                        elif hotkey_id == HOTKEY_SUBMIT:
-                            self.logger.debug("Submit hotkey pressed")
-                            threading.Thread(target=self.submit_recording, daemon=True).start()
-                    
-                    user32.TranslateMessage(ctypes.byref(msg))
-                    user32.DispatchMessageW(ctypes.byref(msg))
-                else:
-                    # No messages, sleep briefly to avoid CPU spinning
-                    time.sleep(0.01)
-        
-        except Exception as e:
-            self.logger.error(f"Hotkey monitor error: {e}")
-        
-        finally:
-            # Unregister hotkeys
-            try:
-                user32.UnregisterHotKey(None, HOTKEY_TOGGLE)
-                user32.UnregisterHotKey(None, HOTKEY_STOP)
-                user32.UnregisterHotKey(None, HOTKEY_SUBMIT)
-                self.logger.info("Hotkeys unregistered")
-            except:
-                pass
     
     def run(self):
         """Run the application with system tray icon."""
@@ -640,6 +582,9 @@ TROUBLESHOOTING:
             "Voice Transcription",
             self.tray_menu.create_menu()
         )
+
+        # Set initial icon color based on current state
+        self.icon_effects.update_icon()
 
         # Start worker threads
         worker_thread = threading.Thread(
@@ -657,11 +602,13 @@ TROUBLESHOOTING:
         worker_thread.start()
 
         # Start hotkey monitor
-        hotkey_thread = threading.Thread(target=self.hotkey_monitor, daemon=True)
-        hotkey_thread.start()
+        self.hotkey_monitor.start()
 
         # Start endpoint health monitor
         self.start_endpoint_monitor()
+
+        # Start buffer monitor
+        self.start_buffer_monitor()
 
         # Start recording in background thread
         recording_thread = threading.Thread(
